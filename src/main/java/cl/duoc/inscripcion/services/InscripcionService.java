@@ -3,10 +3,13 @@ package cl.duoc.inscripcion.services;
 import java.time.LocalDateTime;
 import java.util.List;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import cl.duoc.inscripcion.dto.InscripcionRequest;
+import cl.duoc.inscripcion.dto.ResumenInscripcionMessage;
 import cl.duoc.inscripcion.entities.Curso;
 import cl.duoc.inscripcion.entities.Inscripcion;
 import cl.duoc.inscripcion.repositories.CursoRepository;
@@ -15,11 +18,16 @@ import cl.duoc.inscripcion.repositories.InscripcionRepository;
 @Service
 public class InscripcionService {
 
+    private static final Logger log = LoggerFactory.getLogger(InscripcionService.class);
+
     @Autowired
     private InscripcionRepository inscripcionRepository;
 
     @Autowired
     private CursoRepository cursoRepository;
+
+    @Autowired
+    private ResumenProductorService resumenProductorService;
 
     public Inscripcion inscribir(InscripcionRequest request) {
 
@@ -44,7 +52,31 @@ public class InscripcionService {
         ins.setCursos(cursos);
         ins.setTotalPagar(total);
 
-        return inscripcionRepository.save(ins);
+        Inscripcion inscripcionGuardada = inscripcionRepository.save(ins);
+
+        // Semana 7: se envia el resumen de la inscripcion (recien creada, Semana 1)
+        // hacia la cola RabbitMQ de forma asincrona. El consumidor la procesara y
+        // guardara el resumen de compra en la nueva tabla resumen_compra.
+        try {
+            List<String> nombresCursos = cursos.stream().map(Curso::getNombre).toList();
+            ResumenInscripcionMessage resumen = new ResumenInscripcionMessage(
+                    inscripcionGuardada.getId(),
+                    inscripcionGuardada.getNombreEstudiante(),
+                    inscripcionGuardada.getEmailEstudiante(),
+                    inscripcionGuardada.getFechaInscripcion(),
+                    nombresCursos,
+                    subtotal,
+                    Math.round(iva * 100.0) / 100.0,
+                    inscripcionGuardada.getTotalPagar());
+            resumenProductorService.enviarResumen(resumen);
+        } catch (Exception e) {
+            // La inscripcion ya quedo persistida; un fallo al publicar en la cola
+            // no debe interrumpir la respuesta al usuario, solo se registra el error.
+            log.error("No se pudo enviar el resumen de la inscripcion id={} a la cola RabbitMQ: {}",
+                    inscripcionGuardada.getId(), e.getMessage(), e);
+        }
+
+        return inscripcionGuardada;
     }
 
     public List<Inscripcion> listarTodas() {
